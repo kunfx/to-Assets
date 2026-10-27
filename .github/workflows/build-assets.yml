@@ -1,8 +1,9 @@
+
 name: Build Assets.car
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: ["main", "master"]
   workflow_dispatch:
 
 jobs:
@@ -13,40 +14,63 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Compile Assets.car
+      - name: Check Assets.xcassets
+        shell: bash
         run: |
-          mkdir -p output
-          
-          # 寻找 .xcassets 路径
-          XCASSETS_PATH=$(find . -name "*.xcassets" -type d | head -n 1)
-          if [ -z "$XCASSETS_PATH" ]; then
-            echo "::error::未找到 .xcassets 文件夹！"
+          set -euo pipefail
+
+          if [ ! -d "Assets.xcassets" ]; then
+            echo "::error::未找到仓库根目录下的 Assets.xcassets"
             exit 1
           fi
-          
-          echo "编译目标: $XCASSETS_PATH"
-          
-          # 执行编译
-          xcrun actool "$XCASSETS_PATH" \
-            --compile output \
+
+          if [ ! -f "Assets.xcassets/Contents.json" ]; then
+            echo "::error::缺少 Assets.xcassets/Contents.json"
+            exit 1
+          fi
+
+          echo "=== 检查图片集数量 ==="
+          find Assets.xcassets -type d -name "*.imageset" | sort
+
+          echo "=== 检查图片集配置文件 ==="
+          find Assets.xcassets -type d -name "*.imageset" \
+            -exec sh -c '
+              for dir do
+                if [ ! -f "$dir/Contents.json" ]; then
+                  echo "::error file=$dir/Contents.json::缺少 Contents.json"
+                  exit 1
+                fi
+              done
+            ' sh {} +
+
+      - name: Compile Assets.car
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p output
+          rm -f output/Assets.car
+
+          echo "=== 开始编译 Assets.xcassets ==="
+
+          xcrun actool "Assets.xcassets" \
+            --compile "$PWD/output" \
             --platform iphoneos \
-            --target-device iphone \
             --minimum-deployment-target 13.0 \
+            --target-device iphone \
+            --target-device ipad \
             --output-format human-readable-text
 
-          echo "=== 检查当前目录及 output 目录下生成的文件 ==="
-          ls -la output
-          
-          # 全局查找所有生成的 .car 文件
-          CAR_FILE=$(find . -name "*.car" | head -n 1)
-          
-          if [ -n "$CAR_FILE" ]; then
-            echo "成功找到编译产物: $CAR_FILE"
-            cp "$CAR_FILE" output/Assets.car
-          else
-            echo "::error::未能生成任何 .car 文件！请展开当前步骤日志查看 actool 输出。"
+          if [ ! -s "output/Assets.car" ]; then
+            echo "::error::编译结束，但没有生成有效的 Assets.car"
+            echo "=== output 目录内容 ==="
+            ls -la output
             exit 1
           fi
+
+          echo "=== 编译成功 ==="
+          ls -lh output/Assets.car
+          file output/Assets.car
 
       - name: Upload Assets.car Artifact
         uses: actions/upload-artifact@v4
@@ -54,3 +78,4 @@ jobs:
           name: compiled-assets
           path: output/Assets.car
           if-no-files-found: error
+          retention-days: 30
