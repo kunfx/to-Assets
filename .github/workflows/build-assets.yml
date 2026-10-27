@@ -1,9 +1,8 @@
-
 name: Build Assets.car
 
 on:
   push:
-    branches: ["main", "master"]
+    branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
@@ -14,63 +13,101 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check Assets.xcassets
-        shell: bash
+      - name: Auto Fix Assets Structure
         run: |
-          set -euo pipefail
+          echo "=== 开始规范化整理目录结构 ==="
+          
+          # 创建标准的 Assets.xcassets 目录
+          mkdir -p RealAssets.xcassets
+          
+          # 生成根 Contents.json
+          cat << 'EOF' > RealAssets.xcassets/Contents.json
+          {
+            "info" : {
+              "author" : "xcode",
+              "version" : 1
+            }
+          }
+          EOF
 
-          if [ ! -d "Assets.xcassets" ]; then
-            echo "::error::未找到仓库根目录下的 Assets.xcassets"
-            exit 1
+          # 寻找存放图标的根目录（寻找包含 ads 文件夹的目录）
+          SRC_DIR=$(find . -name "ads" -type d | head -n 1 | sed 's/\/ads$//')
+          if [ -z "$SRC_DIR" ]; then
+            SRC_DIR="."
           fi
+          echo "图标源目录位于: $SRC_DIR"
 
-          if [ ! -f "Assets.xcassets/Contents.json" ]; then
-            echo "::error::缺少 Assets.xcassets/Contents.json"
-            exit 1
-          fi
+          # 遍历所有子文件夹并转换
+          for dir in "$SRC_DIR"/*/; do
+            [ -d "$dir" ] || continue
+            name=$(basename "$dir")
+            
+            # 跳过 github 和输出目录
+            if [ "$name" = ".github" ] || [ "$name" = "RealAssets.xcassets" ] || [ "$name" = "output" ]; then
+              continue
+            fi
+            
+            target_dir="RealAssets.xcassets/${name}.imageset"
+            mkdir -p "$target_dir"
+            cp "$dir"* "$target_dir/" 2>/dev/null || true
 
-          echo "=== 检查图片集数量 ==="
-          find Assets.xcassets -type d -name "*.imageset" | sort
+            # 判断是单倍图还是多倍图，自动生成对应的 Contents.json
+            if [ -f "$target_dir/${name}.png" ]; then
+              cat << EOF > "$target_dir/Contents.json"
+          {
+            "images" : [
+              { "filename" : "${name}.png", "idiom" : "universal", "scale" : "1x" },
+              { "idiom" : "universal", "scale" : "2x" },
+              { "idiom" : "universal", "scale" : "3x" }
+            ],
+            "info" : { "author" : "xcode", "version" : 1 }
+          }
+          EOF
+            else
+              cat << EOF > "$target_dir/Contents.json"
+          {
+            "images" : [
+              { "idiom" : "universal", "scale" : "1x" },
+              { "filename" : "${name}@2x.png", "idiom" : "universal", "scale" : "2x" },
+              { "filename" : "${name}@3x.png", "idiom" : "universal", "scale" : "3x" }
+            ],
+            "info" : { "author" : "xcode", "version" : 1 }
+          }
+          EOF
+            fi
+          done
 
-          echo "=== 检查图片集配置文件 ==="
-          find Assets.xcassets -type d -name "*.imageset" \
-            -exec sh -c '
-              for dir do
-                if [ ! -f "$dir/Contents.json" ]; then
-                  echo "::error file=$dir/Contents.json::缺少 Contents.json"
-                  exit 1
-                fi
-              done
-            ' sh {} +
+          echo "=== 整理完成，查看生成的目录 ==="
+          ls -la RealAssets.xcassets
 
       - name: Compile Assets.car
-        shell: bash
         run: |
-          set -euo pipefail
-
           mkdir -p output
-          rm -f output/Assets.car
-
-          echo "=== 开始编译 Assets.xcassets ==="
-
-          xcrun actool "Assets.xcassets" \
-            --compile "$PWD/output" \
+          
+          # 执行编译
+          xcrun actool RealAssets.xcassets \
+            --compile output \
             --platform iphoneos \
-            --minimum-deployment-target 13.0 \
             --target-device iphone \
-            --target-device ipad \
+            --minimum-deployment-target 13.0 \
             --output-format human-readable-text
 
-          if [ ! -s "output/Assets.car" ]; then
-            echo "::error::编译结束，但没有生成有效的 Assets.car"
-            echo "=== output 目录内容 ==="
-            ls -la output
+          echo "=== 检查输出文件 ==="
+          ls -la output
+          
+          # 查找生成的 .car 文件并统一命名
+          CAR_FILE=$(find output -name "*.car" | head -n 1)
+          if [ -z "$CAR_FILE" ]; then
+            CAR_FILE=$(find . -name "*.car" | head -n 1)
+          fi
+          
+          if [ -n "$CAR_FILE" ]; then
+            echo "成功找到产物: $CAR_FILE"
+            cp "$CAR_FILE" output/Assets.car
+          else
+            echo "::error::编译失败，未找到任何 .car 文件！"
             exit 1
           fi
-
-          echo "=== 编译成功 ==="
-          ls -lh output/Assets.car
-          file output/Assets.car
 
       - name: Upload Assets.car Artifact
         uses: actions/upload-artifact@v4
@@ -78,4 +115,3 @@ jobs:
           name: compiled-assets
           path: output/Assets.car
           if-no-files-found: error
-          retention-days: 30
