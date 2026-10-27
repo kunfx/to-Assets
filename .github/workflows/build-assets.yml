@@ -1,8 +1,11 @@
+
 name: Build Assets.car
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches:
+      - main
+      - master
   workflow_dispatch:
 
 jobs:
@@ -13,103 +16,161 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Auto Fix Assets Structure
+      - name: Prepare asset catalog automatically
+        shell: bash
         run: |
-          echo "=== 开始规范化整理目录结构 ==="
-          
-          # 创建标准的 Assets.xcassets 目录
-          mkdir -p RealAssets.xcassets
-          
-          # 生成根 Contents.json
-          cat << 'EOF' > RealAssets.xcassets/Contents.json
-          {
-            "info" : {
-              "author" : "xcode",
-              "version" : 1
-            }
-          }
-          EOF
+          set -euo pipefail
 
-          # 寻找存放图标的根目录（寻找包含 ads 文件夹的目录）
-          SRC_DIR=$(find . -name "ads" -type d | head -n 1 | sed 's/\/ads$//')
-          if [ -z "$SRC_DIR" ]; then
-            SRC_DIR="."
-          fi
-          echo "图标源目录位于: $SRC_DIR"
+          ASSETS_PATH="$GITHUB_WORKSPACE/Assets.xcassets"
 
-          # 遍历所有子文件夹并转换
-          for dir in "$SRC_DIR"/*/; do
-            [ -d "$dir" ] || continue
-            name=$(basename "$dir")
-            
-            # 跳过 github 和输出目录
-            if [ "$name" = ".github" ] || [ "$name" = "RealAssets.xcassets" ] || [ "$name" = "output" ]; then
-              continue
-            fi
-            
-            target_dir="RealAssets.xcassets/${name}.imageset"
-            mkdir -p "$target_dir"
-            cp "$dir"* "$target_dir/" 2>/dev/null || true
-
-            # 判断是单倍图还是多倍图，自动生成对应的 Contents.json
-            if [ -f "$target_dir/${name}.png" ]; then
-              cat << EOF > "$target_dir/Contents.json"
-          {
-            "images" : [
-              { "filename" : "${name}.png", "idiom" : "universal", "scale" : "1x" },
-              { "idiom" : "universal", "scale" : "2x" },
-              { "idiom" : "universal", "scale" : "3x" }
-            ],
-            "info" : { "author" : "xcode", "version" : 1 }
-          }
-          EOF
-            else
-              cat << EOF > "$target_dir/Contents.json"
-          {
-            "images" : [
-              { "idiom" : "universal", "scale" : "1x" },
-              { "filename" : "${name}@2x.png", "idiom" : "universal", "scale" : "2x" },
-              { "filename" : "${name}@3x.png", "idiom" : "universal", "scale" : "3x" }
-            ],
-            "info" : { "author" : "xcode", "version" : 1 }
-          }
-          EOF
-            fi
-          done
-
-          echo "=== 整理完成，查看生成的目录 ==="
-          ls -la RealAssets.xcassets
-
-      - name: Compile Assets.car
-        run: |
-          mkdir -p output
-          
-          # 执行编译
-          xcrun actool RealAssets.xcassets \
-            --compile output \
-            --platform iphoneos \
-            --target-device iphone \
-            --minimum-deployment-target 13.0 \
-            --output-format human-readable-text
-
-          echo "=== 检查输出文件 ==="
-          ls -la output
-          
-          # 查找生成的 .car 文件并统一命名
-          CAR_FILE=$(find output -name "*.car" | head -n 1)
-          if [ -z "$CAR_FILE" ]; then
-            CAR_FILE=$(find . -name "*.car" | head -n 1)
-          fi
-          
-          if [ -n "$CAR_FILE" ]; then
-            echo "成功找到产物: $CAR_FILE"
-            cp "$CAR_FILE" output/Assets.car
-          else
-            echo "::error::编译失败，未找到任何 .car 文件！"
+          if [ ! -d "$ASSETS_PATH" ]; then
+            echo "::error::找不到 Assets.xcassets 目录"
             exit 1
           fi
 
-      - name: Upload Assets.car Artifact
+          echo "=== 检查资源目录 ==="
+          find "$ASSETS_PATH" -maxdepth 2 -type f | sort
+
+          # 自动将直接位于 Assets.xcassets 下的普通目录改为 .imageset
+          find "$ASSETS_PATH" -mindepth 1 -maxdepth 1 -type d \
+            ! -name '*.imageset' -print0 |
+          while IFS= read -r -d '' dir; do
+            name="$(basename "$dir")"
+            target="$ASSETS_PATH/$name.imageset"
+
+            if [ -e "$target" ]; then
+              echo "::error::目标目录已存在，无法自动重命名：$target"
+              exit 1
+            fi
+
+            mv "$dir" "$target"
+            echo "目录转换：$name -> $name.imageset"
+          done
+
+          # 为缺少 Contents.json 的 imageset 自动生成配置
+          export ASSETS_PATH
+          python3 <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          root = Path(os.environ["ASSETS_PATH"])
+          supported = {".png", ".jpg", ".jpeg", ".heic", ".pdf"}
+
+          for folder in sorted(root.glob("*.imageset")):
+              config_path = folder / "Contents.json"
+
+              # 已有配置不覆盖
+              if config_path.exists():
+                  print(f"保留现有配置：{config_path}")
+                  continue
+
+              images = []
+
+              for file in sorted(folder.iterdir()):
+                  if not file.is_file() or file.suffix.lower() not in supported:
+                      continue
+
+                  match = re.search(r"@([123])x$", file.stem)
+                  scale = f"{match.group(1)}x" if match else "1x"
+
+                  images.append({
+                      "filename": file.name,
+                      "idiom": "universal",
+                      "scale": scale
+                  })
+
+              if not images:
+                  print(f"::warning::目录没有可识别的图片：{folder.name}")
+                  continue
+
+              config = {
+                  "images": images,
+                  "info": {
+                      "author": "xcode",
+                      "version": 1
+                  }
+              }
+
+              config_path.write_text(
+                  json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+                  encoding="utf-8"
+              )
+
+              print(f"已生成配置：{config_path.name}（{folder.name}，{len(images)} 张图片）")
+
+          # 校验所有 imageset 中引用的文件是否存在
+          errors = []
+
+          for folder in sorted(root.glob("*.imageset")):
+              config_path = folder / "Contents.json"
+
+              if not config_path.exists():
+                  errors.append(f"缺少配置文件：{folder.name}/Contents.json")
+                  continue
+
+              try:
+                  config = json.loads(config_path.read_text(encoding="utf-8-sig"))
+                  for item in config.get("images", []):
+                      filename = item.get("filename")
+                      if filename and not (folder / filename).is_file():
+                          errors.append(f"图片不存在：{folder.name}/{filename}")
+              except Exception as exc:
+                  errors.append(f"配置文件格式错误：{config_path}：{exc}")
+
+          if errors:
+              for error in errors:
+                  print(f"::error::{error}")
+              raise SystemExit(1)
+
+          print("资源目录及 Contents.json 检查通过")
+          PY
+
+      - name: Compile Assets.car
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          OUTPUT_PATH="$GITHUB_WORKSPACE/output"
+          ASSETS_PATH="$GITHUB_WORKSPACE/Assets.xcassets"
+
+          mkdir -p "$OUTPUT_PATH"
+
+          echo "=== Xcode 版本 ==="
+          xcodebuild -version
+
+          echo "=== 开始编译 Assets.xcassets ==="
+
+          xcrun actool "$ASSETS_PATH" \
+            --compile "$OUTPUT_PATH" \
+            --platform iphoneos \
+            --target-device iphone \
+            --minimum-deployment-target 13.0 \
+            --output-format human-readable-text \
+            --notices \
+            --warnings \
+            --errors
+
+          RESULT=$?
+
+          echo "=== 编译结果 ==="
+          find "$OUTPUT_PATH" -maxdepth 2 -type f -print
+
+          if [ "$RESULT" -ne 0 ]; then
+            echo "::error::actool 编译失败，具体错误请查看上面的日志"
+            exit "$RESULT"
+          fi
+
+          if [ ! -s "$OUTPUT_PATH/Assets.car" ]; then
+            echo "::error::编译结束，但没有生成有效的 Assets.car"
+            exit 1
+          fi
+
+          echo "Assets.car 编译成功"
+          ls -lh "$OUTPUT_PATH/Assets.car"
+
+      - name: Upload compiled Assets.car
         uses: actions/upload-artifact@v4
         with:
           name: compiled-assets
